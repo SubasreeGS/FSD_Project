@@ -1,0 +1,154 @@
+package com.springboot.AutomobileInsurance.service;
+
+import com.springboot.AutomobileInsurance.dto.request.OfficerDto;
+import com.springboot.AutomobileInsurance.dto.request.OfficerUpdateDto;
+import com.springboot.AutomobileInsurance.dto.response.*;
+import com.springboot.AutomobileInsurance.enums.*;
+import com.springboot.AutomobileInsurance.exception.InvalidCallException;
+import com.springboot.AutomobileInsurance.exception.ResourceNotFoundException;
+import com.springboot.AutomobileInsurance.mapper.OfficerMapper;
+import com.springboot.AutomobileInsurance.model.Officer;
+import com.springboot.AutomobileInsurance.model.User;
+import com.springboot.AutomobileInsurance.repository.*;
+import lombok.RequiredArgsConstructor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.time.*;
+import java.util.List;
+import java.util.Optional;
+
+@Service
+@RequiredArgsConstructor
+public class OfficerService {
+
+    private final OfficerRepository officerRepository;
+    private final PolicyRepository policyRepository;
+    private final ClaimRepository claimRepository;
+    private final ProposalRepository proposalRepository;
+    private final UserRepository userRepository;
+    private final PasswordEncoder passwordEncoder;
+    private final Logger log = LoggerFactory.getLogger(OfficerService.class);
+
+    @Transactional
+    public void insertOfficer(OfficerDto dto) {
+        //  Check if username already exists in user db
+        log.info("Attempting to onboard new Officer with username: '{}'", dto.username());
+
+        if (userRepository.existsByUsername(dto.username().trim())) {
+            log.warn("Onboarding failed: Username '{}' already taken", dto.username());
+            throw new RuntimeException("Username '" + dto.username().trim() + "' is already taken. Please choose another.");
+        }
+
+        // Step 1: Prepare user
+       User user = new User();
+       user.setUsername(dto.username());
+       user.setPassword(passwordEncoder.encode(dto.password()));
+       user.setRole(Role.OFFICER);
+        // Step 1.5: save user in db
+       userRepository.save(user);
+
+        // Step 2: Map dto to obj
+        Officer officer = OfficerMapper.convertDtoToEntity(dto);
+
+        // Step 3: Attach User to Officer
+        officer.setUser(user);
+
+        // Step 4: Save officer
+        officerRepository.save(officer);
+        log.info("Officer '{}' successfully created with ID: {}", officer.getName(), officer.getId());
+    }
+
+    public OfficerAnalyticsDto getOfficerAnalytics() {
+        log.debug("Compiling underwriting metrics and settlement payout analytics for officer dashboard");
+        List<StatDto> claimsStats = claimRepository.getClaimsCountByStatus();
+        List<StatDto> proposalStats = proposalRepository.getProposalsCountByStatus();
+        Double totalPayout = claimRepository.getTotalSettledPayout();
+
+        return new OfficerAnalyticsDto(claimsStats, proposalStats, totalPayout);
+    }
+
+    public ClaimFilterDto filterClaims(ClaimStatus status, LocalDate fromDate, LocalDate toDate, Integer page, Integer size) {
+        int pageNo = (page == null || page < 0) ? 0 : page;
+        int pageSize = (size == null || size < 1) ? 10 : size;
+        Pageable pageable = PageRequest.of(pageNo, pageSize);
+
+        log.debug("Filtering claims: status={}, fromDate={}, toDate={}, page={}, size={}", status, fromDate, toDate, page, size);
+        Instant fromInstant = (fromDate == null) ? null : fromDate.atStartOfDay(ZoneOffset.UTC).toInstant();
+        Instant toInstant = (toDate == null) ? null : toDate.atTime(LocalTime.MAX).atOffset(ZoneOffset.UTC).toInstant();
+
+        Page<ClaimRespDto> pageDto = claimRepository.dynamicFilterClaims(status, fromInstant, toInstant, pageable);
+
+        return new ClaimFilterDto(
+                pageDto.getContent(),
+                new PaginationDto(
+                        pageDto.getTotalPages(),
+                        pageDto.getTotalElements(),
+                        pageDto.getNumberOfElements()
+                )
+        );
+    }
+
+    public ProposalFilterDto filterProposals(
+            PolicyType policyType,
+            ProposalStatus status,
+            LocalDate fromDate,
+            LocalDate toDate,
+            Integer page,
+            Integer size
+    ) {
+        log.debug("Filtering proposals: policyType={}, status={}, fromDate={}, toDate={}, page={}, size={}", policyType, status, fromDate, toDate, page, size);
+        int pageNo = (page == null || page < 0) ? 0 : page;
+        int pageSize = (size == null || size < 1) ? 10 : size;
+        Pageable pageable = PageRequest.of(pageNo, pageSize);
+
+        Instant fromInstant = (fromDate == null) ? null : fromDate.atStartOfDay(ZoneOffset.UTC).toInstant();
+        Instant toInstant = (toDate == null) ? null : toDate.atTime(LocalTime.MAX).atOffset(ZoneOffset.UTC).toInstant();
+
+        Page<ProposalRespDto> pageDto = proposalRepository.dynamicFilterProposals(
+                policyType,
+                status,
+                fromInstant,
+                toInstant,
+                pageable
+        );
+
+        return new ProposalFilterDto(
+                pageDto.getContent(),
+                new PaginationDto(
+                        pageDto.getTotalPages(),
+                        pageDto.getTotalElements(),
+                        pageDto.getNumberOfElements()
+                )
+        );
+    }
+    public OfficerPaginationDto getOfficersWithPagination(int page, int size) {
+        log.info("Fetching officer directory - Page: {}, Size: {}", page, size);
+        int pageNo = Math.max(page, 0);
+        int pageSize = (size < 1) ? 5 : size;
+        Pageable pageable = PageRequest.of(pageNo, pageSize, Sort.by("id").descending());
+
+        Page<Officer> officerPage = officerRepository.findAll(pageable);
+
+        List<OfficerResponseDto> dtoList = officerPage.getContent()
+                .stream()
+                .map(OfficerMapper::convertEntityToDto)
+                .toList();
+
+        PaginationDto paginationDto = new PaginationDto(
+                officerPage.getTotalPages(),
+                officerPage.getTotalElements(),
+                officerPage.getNumberOfElements()
+        );
+
+        return new OfficerPaginationDto(dtoList, paginationDto);
+    }
+
+}
